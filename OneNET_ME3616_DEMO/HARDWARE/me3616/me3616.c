@@ -6,7 +6,6 @@
 #include "usart1.h"
 #include "usart3.h"
 #include "delay.h"
-#include "utils.h"
 #include "malloc.h"
 #include "FreeRTOS.h"
 #include "task.h"
