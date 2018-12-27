@@ -10,6 +10,7 @@
 #include "malloc.h"
 #include "sht20_i2c.h"
 #include "sht20.h"
+#include "timer.h"
 
 void hardware_init(void);
 
@@ -22,9 +23,15 @@ int main(void)
 
 #if 1
 	me3616_power_on();
+	delay_ms(1000);
+	#ifdef ME3616_OPEN_SLEEP_MODE
+	me3616_sleep_config(1);		/* 打开模组休眠模式 */
+	#else
+	me3616_sleep_config(0);		/* 关闭模组休眠模式 */
+	#endif
 	me3616_hardware_reset();
-	
-	me3616_connect_onenet_app_task();
+
+	me3616_connect_onenet_app();
 	vTaskStartScheduler();
 
 #else
@@ -50,11 +57,9 @@ void hardware_init(void)
 {
 	NVIC_PriorityGroupConfig(NVIC_PriorityGroup_4);
 	delay_init();
-	#ifndef SYSTEM_SUPPORT_OS
-	my_mem_init(SRAMIN);
-	#endif
 	usart1_init(115200);
 	usart3_init(115200);
+	TIM3_Int_Init(9999, 7199);
 	led_init();	
 	me3616_power_init();
 	sht20_i2c_init();
