@@ -13,37 +13,50 @@
 #include "timers.h"
 #include "sht20.h"
 
-#ifdef SYSTEM_SUPPORT_OS
-#define ME3616_MALLOC(size)	pvPortMalloc(size)
-#define ME3616_FREE(p)	vPortFree(p)
-#else
-#define ME3616_MALLOC(size)	mymalloc(SRAMIN, size)
-#define ME3616_FREE(p)	myfree(SRAMIN, p)
-#endif
+#define ME3616_WAKE_UP_HIGH	GPIO_SetBits(GPIOC, GPIO_Pin_6)
+#define ME3616_WAKE_UP_LOW	GPIO_ResetBits(GPIOC, GPIO_Pin_6)
+
+#define ME3616_MIPLNOTIFY_TIME	3000
+
+int g_opend_lifetime = 3600;
+int g_addobj_objectid = 3303;
+int g_observe_msgid;
+int g_observe_flag;
+int g_observe_objectid;
+int g_observe_instanceid;
+int g_observe_resourceid;
+int g_discover_msgid;
+int g_discover_objectid;
+char *g_discover_valuestring = "\"5700;5701\"";
+int g_notify_resourceid_5700_sensor_value = 5700;
+int g_notify_resourceid_5701_sensor_units = 5701;
+char g_sensor_value[5];
+u16 g_hardware_times = 0;
+u8 g_me3616_miplnotify_flag = 0;
 
 extern _sht20_data_t sht20_data_t;
 
-
 /* 任务句柄 */
 TaskHandle_t g_me3616_process_back_result_task_handle = NULL;	
-TimerHandle_t g_me3616_miplnotify_sw_timer_handle = NULL;
 
 /**************************************************************
 函数名称 : me3616_power_init
 函数功能 : me3616电源初始化
 输入参数 : 无
 返回值  	 : 无
-备注		 : 无
+备注		 : GPIO_Pin_4：ME3616 POWER_ON引脚
+		   GPIO_Pin_5：ME3616 RESET引脚
+		   GPIO_Pin_6：ME3616 WAKE_UP引脚
 **************************************************************/
 void me3616_power_init(void)
 {
 	GPIO_InitTypeDef  GPIO_InitStructure;
  	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOC, ENABLE);/* 使能GPIOC时钟 */
- 	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_4 | GPIO_Pin_5;
+ 	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6;
  	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;	 /* 推挽输出 */
  	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
  	GPIO_Init(GPIOC, &GPIO_InitStructure);
-	GPIO_ResetBits(GPIOC, GPIO_Pin_4 | GPIO_Pin_5);
+	GPIO_ResetBits(GPIOC, GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6);
 }
 
 /**************************************************************
@@ -72,6 +85,20 @@ void me3616_hardware_reset(void)
 	GPIO_SetBits(GPIOC, GPIO_Pin_5);	/* 拉高RESET引脚开始复位 */
 	delay_ms(1000);		
 	GPIO_ResetBits(GPIOC, GPIO_Pin_5);	/* 释放RESET引脚 */
+}
+
+/**************************************************************
+函数名称 : me3616_wake_up
+函数功能 : me3616 外部唤醒
+输入参数 : 无
+返回值  	 : 无
+备注		 : 无
+**************************************************************/
+void me3616_wake_up(void)
+{
+	GPIO_SetBits(GPIOC, GPIO_Pin_6);	/* 拉高WAKE_UP引脚，唤醒模组 */
+	delay_ms(100);
+	GPIO_ResetBits(GPIOC, GPIO_Pin_6);
 }
 
 /**************************************************************
@@ -160,7 +187,6 @@ u8 me3616_send_cmd(char *cmd, char *ack, u16 waittime)
 	{
 		while(--waittime)	/* 等待倒计时 */
 		{
-			delay_ms(10);
 			if(USART3_RX_STA & 0X8000)/* 接收到期待的应答结果 */
 			{
 				if(me3616_check_cmd(ack))/* 得到有效数据 */
@@ -169,6 +195,7 @@ u8 me3616_send_cmd(char *cmd, char *ack, u16 waittime)
 				}
                 USART3_RX_STA = 0;
 			} 
+			delay_ms(10);
 		}
 		if(0 == waittime)
 		{
@@ -178,6 +205,31 @@ u8 me3616_send_cmd(char *cmd, char *ack, u16 waittime)
 	return 0;
 } 
 
+/**************************************************************
+函数名称 : me3616_sleep_config
+函数功能 : 模组睡眠开关
+输入参数 : mode：0，关闭睡眠模式；1：开启睡眠模式
+返回值  	 : 0：成功
+		   1：失败
+备注		 : 配置完之后，需要重启模组才能生效
+**************************************************************/
+u8 me3616_sleep_config(u8 mode)
+{
+	u8 res;
+
+	if(mode)
+	{
+		res = me3616_send_cmd("AT+ZSLR=1", "OK", 300);
+		printf("AT+ZSLR=1\r\n");
+	}
+	else
+	{
+		res = me3616_send_cmd("AT+ZSLR=0", "OK", 300);
+		printf("AT+ZSLR=0\r\n");
+	}
+	
+	return res;
+}
 
 /**************************************************************
 函数名称 : me3616_onenet_miplcreate
@@ -340,6 +392,37 @@ u8 me3616_onenet_miplnotify(int msgid, int objectid, int instanceid,
 	
 	sprintf(cmd_string, "AT+MIPLNOTIFY=0,%d,%d,%d,%d,%d,%d,%s,%d,%d", msgid, objectid, instanceid, resourceid, valuetype, len, value, index, flag);
 
+	printf("%s\r\n", cmd_string);
+	
+	res = me3616_send_cmd(cmd_string, "OK", 300);
+
+	return res;
+}
+
+/**************************************************************
+函数名称 : me3616_onenet_miplupdate
+函数功能 : 注册更新命令
+输入参数 : lifetime：注册到 OneNET 平台的生存时间
+		   mode：1,更新objects 0，不更新objects
+返回值  	 : 0：成功
+		   1：失败
+备注		 : 无
+**************************************************************/
+u8 me3616_onenet_miplupdate(int lifetime, u8 mode)
+{
+	u8 res;
+	char cmd_string[64];
+
+	memset(cmd_string, 0, sizeof(cmd_string));
+
+	if(mode)
+	{
+		sprintf(cmd_string, "AT+MIPLUPDATE=0,%d,1", lifetime);
+	}
+	else
+	{
+		sprintf(cmd_string, "AT+MIPLUPDATE=0,%d,0", lifetime);
+	}
 	printf("%s\r\n", cmd_string);
 	
 	res = me3616_send_cmd(cmd_string, "OK", 300);
@@ -628,26 +711,6 @@ void me3616_parse_onenet_miplread(int *msgid, int *objectid, int *instanceid, in
    *resourceid = atoi(token);
 }
 
-
-int g_notify_resourceid_5700_sensor_value = 5700;
-int g_notify_resourceid_5701_sensor_units = 5701;
-
-char g_discover_valuestring[16];
-
-int g_addobj_objectid = 3303;
-int g_opend_lifetime = 90;
-
-int g_observe_msgid;
-int g_observe_flag;
-int g_observe_objectid;
-int g_observe_instanceid;
-int g_observe_resourceid;
-
-int g_discover_msgid;
-int g_discover_objectid;
-
-#define ME3616_MIPLNOTIFY_SW_TIMER_TIME	(g_opend_lifetime - 20)
-
 /**************************************************************
 函数名称 : me3616_registered_to_onenet
 函数功能 : 设备注册到OneNET平台
@@ -661,32 +724,65 @@ void me3616_registered_to_onenet(void)
 	{
 		printf("AT+MIPLCLOSE OK\r\n");
 	}
-	delay_ms(100);
+	delay_ms(300);
 	if(0 == me3616_onenet_mipldelobj(g_addobj_objectid))
 	{
 		printf("AT+MIPLDELOBJ OK\r\n");
 	}
-	delay_ms(100);
+	delay_ms(300);
 	if(0 == me3616_onenet_mipldelete())
 	{
 		printf("AT+MIPLDELETE OK\r\n");
 	}
-	delay_ms(100);
+	delay_ms(300);
 	if(0 == me3616_onenet_miplcreate())
 	{
 		printf("AT+MIPLCREATE OK\r\n");
 	}
-	delay_ms(100);
+	delay_ms(300);
 	if(0 == me3616_onenet_mipladdobj(g_addobj_objectid, 3, "\"100\"", 2, 0))
 	{
 		printf("AT+MIPLADDOBJ OK\r\n");
 	}
-	delay_ms(100);
+	delay_ms(300);
 	if(0 == me3616_onenet_miplopen(g_opend_lifetime))
 	{
 		printf("AT+MIPLOPEN OK\r\n");
 	}
+	delay_ms(300);
+}
+
+/**************************************************************
+函数名称 : me3616_onenet_miplnotify_process
+函数功能 : 数据上报到OneNET平台
+输入参数 : 无
+返回值  	 : 无
+备注		 : 无
+**************************************************************/
+void me3616_onenet_miplnotify_process(void)
+{
+	TIM_SetCounter(TIM3, 0);	/* 计数器清空 */
+	TIM_Cmd(TIM3, DISABLE);  	/* 关闭TIMx */
+	g_hardware_times = 0;
+				
+	printf("notify to onenet\r\n");
+					
+	memset(g_sensor_value, 0, sizeof(g_sensor_value));
+	sht20_get_value();
+	sprintf(g_sensor_value, "%0.1f", sht20_data_t.sht20_temperture);
+	g_sensor_value[4] = '\0';
+
+	me3616_onenet_miplnotify(g_observe_msgid, g_observe_objectid, g_observe_instanceid, g_notify_resourceid_5700_sensor_value, 4, 4, g_sensor_value, 1, 1);
 	delay_ms(100);
+	me3616_onenet_miplnotify(g_observe_msgid, g_observe_objectid, g_observe_instanceid, g_notify_resourceid_5701_sensor_units, 1, 14, "\"degree celsius\"", 0, 0);
+	delay_ms(100);
+	
+	me3616_onenet_miplupdate(g_opend_lifetime, 1);	
+
+	g_me3616_miplnotify_flag = 0;
+				
+	TIM_Cmd(TIM3, ENABLE);  	/* 使能TIMx */
+
 }
 
 /**************************************************************
@@ -698,64 +794,84 @@ void me3616_registered_to_onenet(void)
 **************************************************************/
 void me3616_process_back_result_task(void *parameter)
 {
-	
 	while(1)
 	{
 		if(USART3_RX_STA & 0X8000)
 		{
-			if(strstr((const char*)USART3_RX_BUF, "+MIPLEVENT"))
+			if(strstr((const char*)USART3_RX_BUF, "+MIPLEVENT") && (0 == g_me3616_miplnotify_flag))
 			{
+				if(strstr((const char*)USART3_RX_BUF, "+MIPLEVENT: 0, 25") || strstr((const char*)USART3_RX_BUF, "+MIPLEVENT: 0, 8") \
+				|| strstr((const char*)USART3_RX_BUF, "+MIPLEVENT: 0, 7") || strstr((const char*)USART3_RX_BUF, "+MIPLEVENT: 0, 5") \
+				|| strstr((const char*)USART3_RX_BUF, "+MIPLEVENT: 0, 9") || strstr((const char*)USART3_RX_BUF, "+MIPLEVENT: 0, 10") \
+				|| strstr((const char*)USART3_RX_BUF, "+MIPLEVENT: 0, 12") || strstr((const char*)USART3_RX_BUF, "+MIPLEVENT: 0, 13") \
+				|| strstr((const char*)USART3_RX_BUF, "+MIPLEVENT: 0, 20") || strstr((const char*)USART3_RX_BUF, "+MIPLEVENT: 0, 3"))
+				{
+					me3616_at_response(1);
+
+					g_hardware_times = 0;
+					TIM_Cmd(TIM3, DISABLE);  /* 关闭TIMx */
+
+					me3616_hardware_reset();	/* 执行硬件复位重启 */
+				}
+				else if(strstr((const char*)USART3_RX_BUF, "+MIPLEVENT: 0, 14"))
+				{
+					me3616_onenet_miplupdate(g_opend_lifetime, 1);
+				}
 				me3616_at_response(1);
 			}
+			#ifdef ME3616_OPEN_SLEEP_MODE
+			else if(strstr((const char*)USART3_RX_BUF, "+MIPLEVENT: 0, 4") && (1 == g_me3616_miplnotify_flag))
+			{
+				me3616_onenet_miplnotify_process();
+			}
+			#else
+			else if(1 == g_me3616_miplnotify_flag)
+			{
+				me3616_onenet_miplnotify_process();
+			}
+			#endif
 			else if(strstr((const char*)USART3_RX_BUF, "+MIPLOBSERVE"))
 			{
 				me3616_parse_onenet_miplobserve(&g_observe_msgid, &g_observe_flag, &g_observe_objectid, &g_observe_instanceid, &g_observe_resourceid);
 				me3616_at_response(1);
-				delay_ms(100);
+				delay_ms(300);
 				me3616_onenet_miplobserve_rsp(g_observe_msgid, 1);
 			}
 			else if(strstr((const char*)USART3_RX_BUF, "+MIPLDISCOVER"))
 			{
 				me3616_parse_onenet_mipldiscover(&g_discover_msgid, &g_discover_objectid);
 				me3616_at_response(1);
-				delay_ms(100);
-				me3616_onenet_mipldiscover_rsp(g_discover_msgid, 1, 9, "\"5700;5701\"");
+				delay_ms(300);
+				me3616_onenet_mipldiscover_rsp(g_discover_msgid, 1, 9, g_discover_valuestring);
 				me3616_at_response(1);
-				delay_ms(500);
-				
-				if(pdPASS == xTimerStart(g_me3616_miplnotify_sw_timer_handle, 0))
-				{
-					printf("start sw timer\r\n");
-				}
+				delay_ms(300);
+
+				me3616_onenet_miplnotify_process();
 			}
 			else if(strstr((const char*)USART3_RX_BUF, "+CIS ERROR"))
 			{
-				if(pdPASS == xTimerStop(g_me3616_miplnotify_sw_timer_handle, 0))
-				{
-					printf("stop sw timer\r\n");
-				}
+				me3616_at_response(1);
+				g_hardware_times = 0;
+				TIM_Cmd(TIM3, DISABLE);  	/* 关闭TIMx */
 				me3616_hardware_reset();	/* 执行硬件复位重启 */
 			}
 			else if(strstr((const char*)USART3_RX_BUF, "auto-reboot"))/* 模组发生异常重启现象 */
 			{
-				if(pdPASS == xTimerStop(g_me3616_miplnotify_sw_timer_handle, 0))	/* 关闭软件定时器 */
-				{
-					printf("stop sw timer\r\n");
-				}
-			//	me3616_hardware_reset();	/* 执行硬件复位重启 */
-
+				me3616_at_response(1);
+				g_hardware_times = 0;
+				TIM_Cmd(TIM3, DISABLE);  /* 关闭TIMx */
 			}
 			else if(strstr((const char*)USART3_RX_BUF, "+IP"))	/* 查到IP，说明模组开机或者重启后注册上网络了 */
 			{
+				me3616_at_response(1);
 				printf("me3616 network registed...\r\n");
 				me3616_registered_to_onenet();
-				me3616_at_response(1);
 			}
 			else
 			{
 				me3616_at_response(1);
 			}
-		}
+		}				
 	}
 }
 
@@ -780,46 +896,45 @@ void me3616_process_back_result_task_init(void)
 }
 
 /**************************************************************
-函数名称 : me3616_miplnotify_sw_timer_callback
-函数功能 : 用FreeRTOS软件定时器定时执行miplnotify
-输入参数 : xTimer:软件定时器任务句柄
+函数名称 : TIM3_IRQHandler
+函数功能 : 定时器3中断服务函数
+输入参数 : 无
 返回值  	 : 无
-备注		 : 无
+备注		 : 定时来notify数据
 **************************************************************/
-void me3616_miplnotify_sw_timer_callback(TimerHandle_t xTimer)
-{
-	char sensor_value[5];
-	sht20_get_value();
+void TIM3_IRQHandler(void)
+{	
+	if(TIM_GetITStatus(TIM3, TIM_IT_Update) != RESET)  /* 检查TIM3更新中断发生与否 */
+	{
+		TIM_ClearITPendingBit(TIM3, TIM_IT_Update  );  /* 清除TIMx更新中断标志 */
 
-	sprintf(sensor_value, "%0.1f", sht20_data_t.sht20_temperture);
-	me3616_onenet_miplnotify(g_observe_msgid, g_observe_objectid, g_observe_instanceid, g_notify_resourceid_5700_sensor_value, 4, 4, sensor_value, 1, 1);
-	me3616_at_response(1);
-	delay_ms(100);
-	me3616_onenet_miplnotify(g_observe_msgid, g_observe_objectid, g_observe_instanceid, g_notify_resourceid_5701_sensor_units, 1, 14, "\"degree celsius\"", 0, 0);
-	me3616_at_response(1);
-	delay_ms(100);
+	//	printf("g_hardware_times=%d\r\n", g_hardware_times);
+		g_hardware_times++;
+		
+		if(g_hardware_times > ME3616_MIPLNOTIFY_TIME)
+		{
+			g_me3616_miplnotify_flag = 1;
+			printf("enter notify, g_hardware_times=%d\r\n", g_hardware_times);
+			#ifdef ME3616_OPEN_SLEEP_MODE
+			ME3616_WAKE_UP_HIGH;
+			usart3_printf("AT");
+			ME3616_WAKE_UP_LOW;	
+			#endif
+			g_hardware_times = 0;
+		}
+	}
 }
 
 /**************************************************************
-函数名称 : me3616_miplnotify_sw_timer_task_init
-函数功能 : 创建软件定时器任务
+函数名称 : me3616_connect_onenet_app
+函数功能 : me3616对接OneNET应用
 输入参数 : 无
 返回值  	 : 无
-备注		 : 周期在lifetime之内
+备注		 : 放对接OneNET的任务
 **************************************************************/
-void me3616_miplnotify_sw_timer_task_init(void)
-{
-	g_me3616_miplnotify_sw_timer_handle = xTimerCreate("me3616_miplnotify_sw_timer_task",
-                                      ME3616_MIPLNOTIFY_SW_TIMER_TIME * 1000, 	/* 软件定时器误差大 */
-                                      pdTRUE,
-                                      NULL,
-                                      me3616_miplnotify_sw_timer_callback);
-}
-
-void me3616_connect_onenet_app_task(void)
+void me3616_connect_onenet_app(void)
 {
 	me3616_process_back_result_task_init();
-	me3616_miplnotify_sw_timer_task_init();
 }
 
 

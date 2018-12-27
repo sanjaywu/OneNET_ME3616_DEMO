@@ -3,18 +3,24 @@
 
 #include "sys.h"
 
+#define ME3616_OPEN_SLEEP_MODE	/* 打开睡眠模式 */
+
 void me3616_power_init(void);
 void me3616_power_on(void);
 void me3616_hardware_reset(void);
+void me3616_wake_up(void);
 
 void me3616_at_response(u8 mode);
 void me3616_clear_recv(void);
 u8 me3616_send_cmd(char *cmd, char *ack, u16 waittime);
+u8 me3616_sleep_config(u8 mode);
 
+/* OneNET */
 u8 me3616_onenet_miplcreate(void);
 u8 me3616_onenet_mipladdobj(int objectid, int instancecount, const char *instancebitmap,
 										int attributecount, int actioncount);
 u8 me3616_onenet_miplopen(int lifetime);
+u8 me3616_onenet_miplupdate(int lifetime, u8 mode);
 u8 me3616_onenet_miplobserve_rsp(int msgid, int result);
 u8 me3616_onenet_mipldiscover_rsp(int msgid, int result, int length,
 												const char *valuestring);
@@ -38,10 +44,8 @@ void me3616_parse_onenet_mipldwrite(int *msgid, int *objectid, int *instanceid,
 											int *resourceid, int *valuetype, int *len, 
 											char *value, int *flag, int *index);
 void me3616_parse_onenet_miplread(int *msgid, int *objectid, int *instanceid, int *resourceid);
-
-
 void me3616_onenet_registered(void);
-void me3616_connect_onenet_app_task(void);
+void me3616_connect_onenet_app(void);
 
 
 #endif
